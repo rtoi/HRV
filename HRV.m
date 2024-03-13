@@ -105,8 +105,8 @@ classdef HRV
 %   MIT License (MIT) Copyright (c) 2015-2020 Marcus Vollmer,
 %   marcus.vollmer@uni-greifswald.de
 %   Feel free to contact me for discussion, proposals and issues.
-%   last modified: 06 August 2020
-%   version: 0.3
+%   last modified: 13 March 2024 / risto@ergonomiapalvelu.fi
+%   version: 0.31
 
     properties
     end
@@ -191,7 +191,7 @@ function hrv_sdnn = SDNN(RR,num,flag,overlap)
 %   normalization by n-1 or n. (default: 1)
 %
 %   Example: If RR = repmat([1 .9],1,5),
-%      then HRV.SDNN(RR,6) is [0;.05;.0471;.05;.049;.05;.05;.05;.05;.05]
+%      then HRV.SDNN(RR,6) is [NaN;NaN;NaN;Nan;.049;.05;.05;.05;.05;.05]
 %      and HRV.SDNN(RR,0,1) is 0.0500 and HRV.SDNN(RR,0,0) is 0.0527.
 
     RR = RR(:);
@@ -264,7 +264,7 @@ function hrv_rmssd = RMSSD(RR,num,flag,overlap)
     if nargin<4 || isempty(overlap)
         overlap = 1;
     end
-    
+
     dRR = diff(RR).^2;
     if num==0
         hrv_rmssd = sqrt(HRV.nansum(dRR)./(sum(~isnan(dRR))-1+flag));
@@ -286,7 +286,7 @@ function hrv_rmssd = RMSSD(RR,num,flag,overlap)
             ts = NaN(length(RR),num);
             for j=1:num
                 ts(j+1:end,j) = dRR(1:end-j+1);
-            end    
+            end
             samplesize = sum(~isnan(ts),2);
             hrv_rmssd = sqrt(HRV.nansum(ts,2)./(samplesize-1+flag));
             hrv_rmssd(samplesize<5) = NaN;
@@ -427,7 +427,11 @@ function [TRI,TINN] = triangular_val(RR,num,w,overlap)
 %      TINN = [.0156;.0156;.0156;.0156;.0156;.0156;.0156;.0156;.0156;.0156] 
 %      and HRV.triangular_val(RR,0,1/64) is 3. 
   
-    RR = RR(:);
+    # In Octave the algorithm works only if RR is a row vector
+    if (rows(RR) > 1)
+      RR = RR';
+    endif
+
     if nargin<2 || isempty(num)
         num = 0;
     end
@@ -442,7 +446,12 @@ function [TRI,TINN] = triangular_val(RR,num,w,overlap)
     TI_M  = @(M,h) sum((interp1([1 M],[max(h) 0],1:M)-h(1:M)).^2)+sum(h(M+1:end).^2);
     
     if num==0
-    	h = histcounts(RR,0:w:5);
+      if (HRV.is_octave)
+        h = histc (RR, 0:w:5)(1:end-1);
+      else
+        h = histcounts(RR,0:w:5);
+     endif
+
         TRI = sum(h)/max(h);
         TRI_X = find(h==max(h),1);
         % search for N and M for triangular interpolation
@@ -479,8 +488,12 @@ function [TRI,TINN] = triangular_val(RR,num,w,overlap)
             steps = ceil(num*(1-overlap));
         end
         for j=steps:steps:length(RR)
+            if (HRV.is_octave)
+              h = histc (RR(max([1 j-num+1]):j),0:w:5)(1:end-1);
+            else
+              h = histcounts(RR(max([1 j-num+1]):j),0:w:5);
+            endif
 
-            h = histcounts(RR(max([1 j-num+1]):j),0:w:5);
             TRI(j) = sum(h)/max(h);
 
             TRI_X = find(h==max(h),1);
@@ -730,13 +743,22 @@ function apen = ApEn(RR,num,m,r)
     for i=m+1:length(RR)
         d(mod(i-1,m+1)+1,:) = NaN;
         d(mod(i-1,m+1)+1,length(RR)+1-i:2*length(RR)-i) = abs(RR(i)-RR);
-        Dm = max(d(mod([i-m:i-1]-1,m+1)+1,:),[],'includenan');
-        Dm1 = max(d,[],'includenan');
+        if (HRV.is_octave)
+          Dm = max(d(mod([i-m:i-1]-1,m+1)+1,:));
+          Dm1 = max(d);
+        else
+          Dm = max(d(mod([i-m:i-1]-1,m+1)+1,:),[],'includenan');
+          Dm1 = max(d,[],'includenan');
+        endif
         Cm(i-m) = sum(Dm<=r,2);
         Cm1(i-m) = sum(Dm1<=r,2);  
     end
     i=i+1;
-    Dm = max(d(mod([i-m:i-1]-1,m+1)+1,:),[],'includenan');
+    if (HRV.is_octave)
+      Dm = max(d(mod([i-m:i-1]-1,m+1)+1,:));
+    else
+      Dm = max(d(mod([i-m:i-1]-1,m+1)+1,:),[],'includenan');
+    endif
     Cm(i-m) = sum(Dm<=r,2);
     
     %correlation integral
@@ -771,52 +793,53 @@ function apen = ApEn(RR,num,m,r)
     end
 end
 
+function [RR_rsmp, ANN_rsmp] = interpolate (RR, Fs, type = 'spline')
+# interpolate Resample RR to get constant sampling frequency
+#
+#   RR_rsmp = interpolate (RR, Fs, type)
+#   RR - Vector containing RR intervals in seconds
+#   Fs - Sampling frequency
+#   type Type of interpolation ('spline' default, 'linear', 'cubic')
+#   RR_rsmp - Interpolated RR tachogram
+#   ANN_rsmp - Equispaced sampling points
+#
+    RR = RR(:);
+    if nargin < 2 || isempty(Fs)
+        error('HRV.interpolate: wrong number or types of arguments');
+    end
 
-function [pLF,pHF,LFHFratio,VLF,LF,HF,f,Y,NFFT] = fft_val_fun(RR,Fs,type)
-%fft_val_fun Spectral analysis of a sequence.
-%   [pLF,pHF,LFHFratio,VLF,LF,HF,f,Y,NFFT] = fft_val_fun(RR,Fs,type)
+    if sum (isnan (RR)) == 0 && length (RR) > 1
+        ANN = cumsum (RR) - RR(1);
+        ANN_rsmp = 0:1/Fs:ANN(end);
+        % use interp1 methods for resampling
+        RR_rsmp = interp1 (ANN, RR, ANN_rsmp, type);
+    else
+        RR_rsmp = [];
+        ANN_rsmp = [];
+    end
+
+endfunction
+
+function [pLF,pHF,LFHFratio,VLF,LF,HF,f,Y,NFFT] = fft_val_fun_rsmp(RR_rsmp, Fs, type = 'spline')
+%fft_val_fun_rsmp Spectral analysis of an interpolated RR sequence.
+%   [pLF,pHF,LFHFratio,VLF,LF,HF,f,Y,NFFT] = fft_val_fun_rsmp(RR_rsmp, Fs, type)
 %   uses FFT to compute the spectral density function of the interpolated
 %   RR tachogram.  The density of very low, low and high frequency parts
 %   will be estimated.
-%   RR is a vector containing RR intervals in seconds.
+%   RR_rsmp is an interpolated RR sequence.
 %   Fs specifies the sampling frequency.
 %   type is the interpolation type. Look up interp1 function of Matlab for
 %   accepted types (default: 'spline').
 %
-%   Example: If RR = repmat([1 .98 .9],1,20),
-%      then [pLF,pHF,LFHFratio,VLF,LF,HF] = HRV.fft_val_fun(RR,1000) yields
-%      pLF = 5.4297 and pHF = 94.5703 and pHFratio = 0.0574 and
-%      VLF = 0.0505 and LF = 0.1749 and HF = 3.0467.
-%      [pLF,pHF,LFHFratio] = HRV.fft_val_fun(RR,1000,'linear') yields
-%      pLF = 4.0484 and pHF = 95.9516 and LFHFratio = 0.0422.
-%
-%   See also INTERP1, FFT.
 
-    RR = RR(:);
-    if nargin<2 || isempty(Fs)
-        error('HRV.fft_val_fun: wrong number or types of arguments');
-    end   
-    if nargin<3
-        type = 'spline';
+    if nargin < 2 || isempty (Fs)
+        error ('HRV.fft_val_fun_rsmp: wrong number or types of arguments');
     end
-    
-    switch type
-        case 'none'
-            RR_rsmp = RR;
-        otherwise
-            if sum(isnan(RR))==0 && length(RR)>1
-                ANN = cumsum(RR)-RR(1);
-                % use interp1 methods for resampling
-                RR_rsmp = interp1(ANN,RR,0:1/Fs:ANN(end),type);
-            else
-                RR_rsmp = [];
-            end
-    end
-    
+
     % FFT
-    L = length(RR_rsmp); 
-    
-    if L==0 
+    L = length(RR_rsmp);
+
+    if L==0
         pLF = NaN;
         pHF = NaN;
         LFHFratio = NaN;
@@ -828,26 +851,97 @@ function [pLF,pHF,LFHFratio,VLF,LF,HF,f,Y,NFFT] = fft_val_fun(RR,Fs,type)
         NFFT = NaN;
     else
         NFFT = 2^nextpow2(L);
-        Y = fft(HRV.nanzscore(RR_rsmp),NFFT)/L;
-        f = Fs/2*linspace(0,1,NFFT/2+1);  
+        Y = fft (HRV.nanzscore (RR_rsmp), NFFT) / L;
+        f = Fs/2 * linspace (0, 1, NFFT/2+1);
 
-        YY = 2*abs(Y(1:NFFT/2+1));
+        YY = 2 * abs (Y(1:NFFT/2+1));
         YY = YY.^2;
-        
-        VLF = sum(YY(f<=.04));
-        LF  = sum(YY(f<=.15))-VLF;  
-        HF  = sum(YY(f<=.4))-VLF-LF;
-        TP  = sum(YY(f<=.4));
 
-        pLF = LF/(TP-VLF)*100;
-        pHF = HF/(TP-VLF)*100;    
-        LFHFratio = LF/HF; 
+        VLF = sum (YY(f <= .04));
+        LF  = sum (YY(f <= .15))- VLF;
+        HF  = sum (YY(f <= .4)) - VLF - LF;
+        TP  = sum (YY(f <= .4));
+
+        pLF = LF/(TP - VLF) * 100;
+        pHF = HF/(TP - VLF) * 100;
+        LFHFratio = LF/HF;
     end
 end
 
-function [pLF,pHF,LFHFratio,VLF,LF,HF] = fft_val(RR,num,Fs,type,overlap) 
+function [pLF,pHF,LFHFratio,VLF,LF,HF] = fft_val_rsmp(RR_rsmp, num, Fs, type = 'spline', overlap = 1)
+%fft_val_rsmp Spectral analysis of an interpolated RR sequence
+%   [pLF,pHF,LFHFratio,VLF,LF,HF] = fft_val_rsmp(RR_rsmp, num, Fs, type) uses FFT to
+%   compute the spectral density function of the interpolated RR tachogram.
+%   RR_rsmp is a vector containing RR intervals in seconds.
+%   num specifies the number of successive values for which the spectral
+%   density function will be estimated. The density of very low, low and
+%   high frequency parts will be computed.
+%   Fs specifies the sampling frequency.
+%   type is the interpolation type. Look up interp1 function of Matlab for
+%   accepted types (default: 'spline').
+%   For faster computation on local measures you can specify an overlap.
+%   This is a value between 0 and 1. (default: 1)
+%
+
+    if nargin < 3 || isempty (num) || isempty (Fs)
+        error('HRV.fft_val_rsmp: wrong number or types of arguments');
+    end
+
+    if num == 0
+        [pLF,pHF,LFHFratio,VLF,LF,HF,~,~,~] = HRV.fft_val_fun_rsmp(RR_rsmp, Fs, type);
+    else
+        pLF = NaN (size (RR_rsmp));
+        pHF = NaN (size (RR_rsmp));
+        VLF = NaN (size (RR_rsmp));
+        LF  = NaN (size (RR_rsmp));
+        HF  = NaN (size (RR_rsmp));
+        LFHFratio = NaN (size (RR_rsmp));
+
+        if overlap == 1
+            steps = 1;
+        else
+            steps = ceil (num * (1 - overlap));
+        end
+        for j=steps:steps:length (RR_rsmp)
+            [pLF(j), pHF(j), LFHFratio(j), VLF(j), LF(j), HF(j),~,~,~] = ...
+                HRV.fft_val_fun_rsmp (RR_rsmp(max ([1 j - num + 1]):j), Fs, type);
+        end
+    end
+end
+
+function [pLF,pHF,LFHFratio,VLF,LF,HF,f,Y,NFFT] = fft_val_fun(RR, Fs, type = 'spline')
+%fft_val_fun Spectral analysis of a sequence.
+%   [pLF,pHF,LFHFratio,VLF,LF,HF,f,Y,NFFT] = fft_val_fun(RR, Fs, type)
+%   uses FFT to compute the spectral density function of the interpolated
+%   RR tachogram.  The density of very low, low and high frequency parts
+%   will be estimated.
+%   RR is a vector containing RR intervals in seconds.
+%   Fs specifies the sampling frequency.
+%   type is the interpolation type. Look up interp1 function of Matlab for
+%   accepted types (default: 'spline').
+%
+%   Example: If RR = repmat([1 .98 .9],1,20),
+%      then [pLF,pHF,LFHFratio,VLF,LF,HF] = HRV.fft_val_fun(RR,1000) yields
+%      pLF = 0.2006 and pHF = 99.799 and LFHFratio = 2.0102e-03 and
+%      VLF = 1.2839e-03 and LF = 4.5204e-03 and HF = 2.2487
+%
+%      [pLF,pHF,LFHFratio] = HRV.fft_val_fun(RR,1000,'linear') yields
+%      pLF = 0.1081 and pHF = 99.892 and LFHFratio = 1.0820e-03
+%
+%   See also INTERP1, FFT.
+
+  if nargin < 2 || isempty (Fs)
+      error ('HRV.fft_val_fun: wrong number or types of arguments');
+  end
+
+  RR_rsmp = HRV.interpolate (RR, Fs, type);
+  [pLF,pHF,LFHFratio,VLF,LF,HF,f,Y,NFFT] = HRV.fft_val_fun_rsmp (RR_rsmp, Fs, type);
+
+endfunction
+
+function [pLF,pHF,LFHFratio,VLF,LF,HF] = fft_val(RR, num, Fs, type = "spline", overlap = 1)
 %fft_val Spectral analysis.
-%   [pLF,pHF,LFHFratio,VLF,LF,HF] = fft_val(RR,num,Fs,type) uses FFT to
+%   [pLF,pHF,LFHFratio,VLF,LF,HF] = fft_val(RR, num, Fs, type) uses FFT to
 %   compute the spectral density function of the interpolated RR tachogram.
 %   RR is a vector containing RR intervals in seconds.
 %   num specifies the number of successive values for which the spectral
@@ -864,38 +958,15 @@ function [pLF,pHF,LFHFratio,VLF,LF,HF] = fft_val(RR,num,Fs,type,overlap)
 %      LFHFratio = [NaN;NaN;NaN;0;0; ... ;0.0933;0.0828;0.0574].
 %
 %   See also INTERP1, FFT.
-    
-    RR = RR(:);
-    if nargin<3 || isempty(num) || isempty(Fs)
-        error('HRV.fft_val: wrong number or types of arguments');
+
+
+    if nargin < 3 || isempty (num) || isempty (Fs)
+        error ('HRV.fft_val: wrong number or types of arguments');
     end
-    if nargin<4 || isempty(type)
-        type = 'spline';
-    end
-    if nargin<5 || isempty(overlap)
-        overlap = 1;
-    end
-    
-    if num==0
-        [pLF,pHF,LFHFratio,VLF,LF,HF,~,~,~] = HRV.fft_val_fun(RR,Fs,type);    
-    else
-        pLF = NaN(size(RR));
-        pHF = NaN(size(RR));
-        VLF = NaN(size(RR));
-        LF  = NaN(size(RR));
-        HF  = NaN(size(RR));
-        LFHFratio = NaN(size(RR));
-        
-        if overlap==1
-            steps = 1; 
-        else
-            steps = ceil(num*(1-overlap));
-        end
-        for j=steps:steps:length(RR)
-            [pLF(j),pHF(j),LFHFratio(j),VLF(j),LF(j),HF(j),~,~,~] = ...
-                HRV.fft_val_fun(RR(max([1 j-num+1]):j),Fs,type);
-        end
-    end
+
+    RR_rsmp = HRV.interpolate (RR, Fs, type);
+    [pLF,pHF,LFHFratio,VLF,LF,HF] = fft_val_rsmp(RR_rsmp, num, Fs, type, overlap);
+
 end
 
 function [SD1,SD2,SD1SD2ratio] = returnmap_val(RR,num,flag,overlap)
@@ -1521,7 +1592,15 @@ function [z,m,s] = nanzscore(x,opt,varargin)
 end
 
 
-
+%% subfunction that checks if we are in octave
+%% https://stackoverflow.com/a/9838357
+function r = is_octave ()
+  persistent x;
+  if (isempty (x))
+    x = exist ('OCTAVE_VERSION', 'builtin');
+  end
+  r = x;
+end
 
     end
     
